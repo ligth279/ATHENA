@@ -1,0 +1,175 @@
+gphello fellow developers and  AI
+this is specifically for version 6.0.0
+devs can ignore
+this section is for ai  !
+{
+  do the following tasks before each codding run  
+  read the prevous lines
+  trace the logic paths
+  understand the logic 
+  make changes 
+  look for duplictes path
+  inform the user/administer 
+    the changes to be made
+    codes to deleted if requred 
+    explain why
+    any changes to be made are to only done if and only if user/adminstator approves 
+    do read the documentation too
+    and the gpu is intel arc b580  IT EXISTS!!!!!!!!!
+    use latest pytorch 
+    DONT USE PYTORCH-IPEX IT IS NO LONGER SUPPORTED!!!
+    use regular PYTORCH
+    AND OPEN VINO AND oneAPI 
+    OPEN Vino best tho 
+    don´t download bit and bytes!!!!!!!!!!!!!!!!!!!!!!
+    so dont downloand Nvidia dependcies b
+    dont download any dependcies without asking adminstator
+}
+SECTION : 0  what are we making ?
+this page is offical documentation for xilo V6's offical logic  backend its compontents
+xilo v6 is the 6th version and attempt of making a a.i based education software
+
+SECTION 1 : BACKEND
+
+athena is main logic engine that runs in the backend of xilo version 6
+athena will be connected to or is planned to be connected  to xilo web and walter throught rest api unless the plans changes
+
+backend is desgined as event based reactive software with each  major parts and thier  communcation btw each component  
+will be determined the event
+
+each compent will be and must be design to as modular as possilbe
+with compent  talking it other compent use methods like rest or in mdoule language version 
+
+each version will and thier intraction will be explained in detail later
+
+
+the compents are 1) al model controller (amc) {refer section 2 }
+                 2) data controler (dc) {refer section 3}
+                 3) athena logical engine(ale) {refer section 4}
+                 4)web interface{refer section 5}
+                 
+
+
+SECTION 2 : AI Model Controller(amc)
+AMC is major compent of the software 
+we could say it is the ai interface engine of the software
+made to run on intel arc b580 12gb ,i510400f and 16gb ram ddr4 
+and manage/control two models llama 3.1 8b and  wisper(later mutliple version fine tuned version of wisper for each specific langauge )
+
+the amc has following responblites 
+        1) due to limitation of the hardware we can not run more than one  ai at one without risking chance of crash therefore
+        the amc must mange switching and activating spefic ai killing other ai´s(both only after the current proccess being done by whatever ai 
+        running now is over ) that has completed it use 
+            1.1) if an ai is working on a process or problem while another request for use of ai is made amc must wait for the current ai to its finish tasks
+            before  switch
+        2) only 1 ai should be running at a time
+        3)ai like  llama will be having  multiple roles (refer section 2.1 ) it must give right roles as per request
+        4) it must try to maintain the a effeint system while giving absulte performace possible
+
+
+
+SECTION 2.1:LLAMA 3.1 and its multiple personailtions
+ LLAMA 3.1 will have multiple  roles that will be based on events that are
+     TUTOR (event T)
+        in tutor role  in this role  there will be section  of a chapter that the user that is taken from  data controller 
+        it will be in json format
+        any doubt that user  on that section will be explained by the AI  in simple easy to understadable way
+        the ai is to have memory of previos conversation 
+        the unessery data /cache is to removed once the use /roles  is over inoder to save vram
+
+    EVALUTOR (event E)
+        in this role ai acts as evalutor 
+        this mode occurs when a user is taking a quiz(more on this later )  that is event e 
+        in this mode AI is to be working closely with ale's behavioral GEAR (REFER SECTION 4.X)
+        the ai will give hints based the behavioral level 
+        the hints should not have ans themsevles 
+
+SECTION 3:DATA CONTROLLER AND DATA
+    the data to be collected/stored at this point of prototyping is the following
+      1 - in form of json files we will have question/chapter/sections which will divided by class  and subject
+      2- score of each queiz must be calculated
+      3- last 3 chat coversation for the use  carryover of doubts
+      4- data of chapter/sections completed 
+SECTION 4 athena
+    named after the greek goddess of wisdon and knowlegde  
+        athena acts as logical engine for the backend conrotlling rest of the backend function
+    athena consists of rule based algoritims that caculates scores decides result of quiz and actions to be taken
+         and instucts  AMC  on which models to use 
+
+SECTION 5 website
+    1- web site  should have option to choose btw diffrent class
+        -2 once a class has been choosen he should be able to choose from diffrent subject that are exclusive to that class 
+            -3 once he chooses that he should be lead the current chapter or next uncompleted chapter
+            * a student must he able to revise previous chapter but not access next chapter without completion of previous 
+                -4 once a chapter has been choosen  he can choose a section of a chapter 
+                the prvious * applies here too 
+                    when section open in pc the section will be displayed on the left side and  ask the ai for dought on right side
+                    once he finshes the section he can move on to quiz to defer section 6 on working of questions
+                    depending on the result he maybe be given 1 of 3 paths
+                        a)move the next section
+                        b)move to next section but revise thi before moving on to next chapter 
+                        c)revise this chapter 
+                        *note website should have either two version or be able to run in raspberry pi zero 1
+============================================>WORKING OF THE  BACKEND<===============================================================
+
+
+   ############################################>SYSTEM AT EVENT T<####################################################
+    **setup**
+    system changes into event t when user is learning  that is when he is in a section and not in queiz
+    ** how it works **
+    1. the website requests data(files related current section of the current chapter that the user is doing/selected )
+        that includes  josn files  
+    2. frontend tells athena that it is in event t
+    3.athena activates llama 3.1 at role tutor
+    4 user request  a task -  a task is doubt reagarding the chapter ai must tell it to user in much more understanable way
+    5.in case user clicks speak button web will in inform athena - athena stops running of llama 3.1 if it is sitting without any tasks if not 
+        waits for the tasks to be done then stop running of llama 3.1 and activate wisper model and convert what the user is speaking into text 
+        (he is asking doubt  in speech)
+        in case he  clicks  talk  web will inform athena who in turn will  activate wisper once llama fishies its tasks and stopped
+        and will activate wisper and read the  last ai response in website out 
+
+
+    ###########################################SYSTEM AT  EVENT
+    E######################################################
+    **setup**
+    system changes to event E when the user   click ready for queiz option
+    **how it works**
+    1 user clicks the  use quiz button on website
+    2 website informs the athena to switch to event E 
+    3 athena switchs  activates llama 3.1
+    4 website opens the quiz panel 
+                    >>>>>>>>>>>>>>>>>>>>>>>>>>>>how qiuz works<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<              
+            4.1 :   a quiz will have    x  question  
+                     each question will have 5 points 
+                     if user gets a question worng the user will be provided with a hint 
+                     and
+                      if point > 0(for that specific question)
+                        each hint reduces 1 point 
+                      if point  <= 0 
+                         then the student hans´t studied quit quiz and go back to current  section
+                      if  the student  barly passed with x- avg +x points he will  be required to revist the session later  in order to get 100% completion of the subject in y standerd
+
+                      if the student  just passed with x points he will have to retake session before going  to  next chapter 
+                      
+                      
+                    the  checking of ans for correction and  ans  chcked by rba and subsciqent action are decided by the rba 
+                    while hints them selves are generrated  by the llm
+
+                    there is a question of how the ans themsleves are evaulted ?
+                     it is based on how close the  given ans is to the acutal ans
+                     the range for example  will depend of   subject and type of question
+                     for example for matatical question the ans must be absulte
+                     but for  a  one word the spelling must be abslulte
+                     but for a paragraph question minor spelling or words might differ
+                     something that rba can't under stand 
+                     so propsed architure is 
+                     ans -> rba if ture -> pass
+                             -> false -> LLM check if closes(this is used to allow pass   if the question itself is on that allows changes and still be approx right like paragrph qustion 
+                             else in case of spelling mistake for word x or maths  it is treated as wrong  ) -> pass
+                                else -> ai genereate hints 
+                          
+                                one it is  done  ai is supposed to then generate the clue
+                                based on type and  ans 
+
+there was i  event G but i for got what it was guess i will add it later :)    
+                                 
