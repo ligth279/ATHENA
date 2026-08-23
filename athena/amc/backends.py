@@ -7,7 +7,13 @@ from typing import Any
 
 from athena.amc.config import AMCConfig
 from athena.amc.exceptions import ModelPathError
-from athena.amc.gpu import compile_cache_kwargs, resolve_device
+from athena.amc.gpu import (
+    compile_cache_kwargs,
+    drop_pipeline,
+    require_translator_gpu_safe,
+    resolve_device,
+)
+from athena.amc.translate import ApproxTokenCounter
 from athena.amc.types import Streamer
 
 
@@ -65,6 +71,25 @@ class WhisperBackend(ABC):
 
     @abstractmethod
     def transcribe(self, pcm_16k: list[float], *, language: str) -> str: ...
+
+
+class TranslatorBackend(ABC):
+    name = "translate"
+
+    @abstractmethod
+    def load(self) -> None: ...
+
+    @abstractmethod
+    def unload(self) -> None: ...
+
+    @abstractmethod
+    def is_loaded(self) -> bool: ...
+
+    @abstractmethod
+    def generate(self, prompt: str, *, max_new_tokens: int) -> str: ...
+
+    def token_count(self, text: str) -> int:
+        return ApproxTokenCounter().count(text)
 
 
 class MockLlamaBackend(LlamaBackend):
@@ -139,6 +164,41 @@ class MockWhisperBackend(WhisperBackend):
         return "what does this paragraph mean"
 
 
+class MockTranslatorBackend(TranslatorBackend):
+    """Identity translation. Tests the hop and the chunker, not MT quality."""
+
+    def __init__(self) -> None:
+        self._loaded = False
+        self.calls: list[str] = []
+        self.generate_count = 0
+
+    def load(self) -> None:
+        self._loaded = True
+        self.calls.append("load")
+
+    def unload(self) -> None:
+        self._loaded = False
+        self.calls.append("unload")
+
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def generate(self, prompt: str, *, max_new_tokens: int) -> str:
+        self.generate_count += 1
+        self.calls.append("generate")
+        marker = ":\n\n\n"
+        source = prompt.split(marker, 1)[-1] if marker in prompt else prompt
+        source = (
+            source.replace("<end_of_turn>", "")
+            .replace("<start_of_turn>model", "")
+            .strip()
+        )
+        return source
+
+    def token_count(self, text: str) -> int:
+        return ApproxTokenCounter().count(text)
+
+
 _LLAMA_IR_FILES = (
     "openvino_model.xml",
     "openvino_model.bin",
@@ -150,6 +210,13 @@ _WHISPER_IR_FILES = (
     "openvino_encoder_model.bin",
     "openvino_decoder_model.xml",
     "openvino_decoder_model.bin",
+)
+# Gemma 3 VLM export (language + embeddings), not a single openvino_model.bin.
+_TRANSLATE_IR_FILES = (
+    "openvino_language_model.xml",
+    "openvino_language_model.bin",
+    "openvino_tokenizer.xml",
+    "openvino_tokenizer.bin",
 )
 
 
@@ -220,8 +287,9 @@ class LlamaOVBackend(LlamaBackend):
         except Exception:
             pass
         self._in_chat = False
+        pipe = self._pipe
         self._pipe = None
-        gc.collect()
+        drop_pipeline(pipe)
 
     def start_session(self, system_prompt: str) -> None:
         if self._pipe is None:
@@ -281,8 +349,10 @@ class WhisperOVBackend(WhisperBackend):
         self._pipe = ov_genai.WhisperPipeline(str(model_dir), self.device, **kwargs)
 
     def unload(self) -> None:
+        pipe = self._pipe
         self._pipe = None
-        gc.collect()
+        if pipe is not None:
+            drop_pipeline(pipe)
 
     def transcribe(self, pcm_16k: list[float], *, language: str) -> str:
         if self._pipe is None:
@@ -296,14 +366,84 @@ class WhisperOVBackend(WhisperBackend):
         return _as_text(result)
 
 
+class TranslateOVBackend(TranslatorBackend):
+    def __init__(self, config: AMCConfig) -> None:
+        self.config = config
+        self.device = resolve_device(config)
+        self._pipe: Any = None
+        self._counter = ApproxTokenCounter()
+
+    def is_loaded(self) -> bool:
+        return self._pipe is not None
+
+    def load(self) -> None:
+        if self._pipe is not None:
+            return
+        model_dir = _require_ir_dir(
+            self.config.translate_model_path, "TranslateGemma", _TRANSLATE_IR_FILES
+        )
+        if self.config.device.upper() == "GPU":
+            require_translator_gpu_safe(model_dir)
+        import openvino_genai as ov_genai
+
+        kwargs = compile_cache_kwargs(self.config, self.device, "translate")
+        if self.device.upper() == "GPU":
+            # Do NOT pass scheduler_config. That switches VLMPipeline to the
+            # continuous-batching adapter, which has no chat mode and then
+            # MatMul-shape-crashes on text-only generate. Llama uses
+            # scheduler_config on LLMPipeline; this hop cannot.
+            kwargs["PERFORMANCE_HINT"] = "LATENCY"
+            kwargs["NUM_STREAMS"] = "1"
+            kwargs["KV_CACHE_PRECISION"] = "u8"
+        print(
+            f"loading translator on {self.device} from {model_dir} "
+            "(first GPU compile can take several minutes; later loads use ov_cache/translate)",
+            flush=True,
+        )
+        # Split Gemma 3 IR is a VLM (language + embeddings [+ vision]).
+        self._pipe = ov_genai.VLMPipeline(str(model_dir), self.device, **kwargs)
+        print("translator compiled", flush=True)
+        # Official TranslateGemma jinja (huge language map) breaks MiniJinja.
+        # We already emit the trained user-turn in format_translate_prompt().
+        self._pipe.set_chat_template(
+            "{{ bos_token }}{{ messages[-1]['content'] }}"
+        )
+
+    def unload(self) -> None:
+        pipe = self._pipe
+        self._pipe = None
+        if pipe is not None:
+            drop_pipeline(pipe)
+
+    def generate(self, prompt: str, *, max_new_tokens: int) -> str:
+        if self._pipe is None:
+            raise RuntimeError("translator pipeline is not loaded")
+        cfg = self._pipe.get_generation_config()
+        cfg.max_new_tokens = int(max_new_tokens)
+        cfg.do_sample = False
+        if hasattr(cfg, "apply_chat_template"):
+            cfg.apply_chat_template = False
+        if hasattr(cfg, "return_decoded_results"):
+            cfg.return_decoded_results = True
+        # Text-only Event G hop: no image/video tensors.
+        result = self._pipe.generate(
+            prompt, images=[], generation_config=cfg
+        )
+        return _as_text(result)
+
+    def token_count(self, text: str) -> int:
+        return self._counter.count(text)
+
+
 def build_backends(
     config: AMCConfig,
-) -> tuple[LlamaBackend, LlamaBackend, WhisperBackend]:
+) -> tuple[LlamaBackend, LlamaBackend, WhisperBackend, TranslatorBackend]:
     if config.backend == "mock":
         return (
             MockLlamaBackend("llama_int4"),
             MockLlamaBackend("llama_int8"),
             MockWhisperBackend(),
+            MockTranslatorBackend(),
         )
     int4 = LlamaOVBackend(
         config,
@@ -319,4 +459,4 @@ def build_backends(
         cache_subdir="int8",
         name="llama_int8",
     )
-    return int4, int8, WhisperOVBackend(config)
+    return int4, int8, WhisperOVBackend(config), TranslateOVBackend(config)

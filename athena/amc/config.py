@@ -7,12 +7,22 @@ from dataclasses import dataclass, field
 # Hugging Face IDs for a later, admin-approved fetch/convert step.
 # Runtime never downloads these.
 OFFICIAL_LLAMA_SOURCE = "meta-llama/Llama-3.1-8B-Instruct"
-OFFICIAL_WHISPER_SOURCE = "OpenVINO/whisper-small-int8-ov"
+OFFICIAL_WHISPER_SOURCE = "OpenVINO/whisper-large-v3-turbo-int8-ov"
+OFFICIAL_TRANSLATE_SOURCE = "google/translategemma-4b-it"
+
+# TranslateGemma card: 2K input tokens. Feed at most 75% so template +
+# source + generated translation stay inside the window.
+DEFAULT_TRANSLATE_MAX_INPUT = 2048
+DEFAULT_TRANSLATE_FILL_RATIO = 0.75
 
 # B580 12 GB: INT4 (~5 GB) can keep a 4 GB KV window for tutor chat.
 # INT8 (~7.5 GB) cannot — 2 GB KV is enough for a quiz hint and still fits.
+# TranslateGemma is Gemma 3 (config max_position 131072) but the card is 2K.
+# VLMPipeline with cache_size=0 will try to size KV for that window and
+# CL_OUT_OF_RESOURCES on generate even for a short sentence.
 DEFAULT_KV_CACHE_GB_INT4 = 4
 DEFAULT_KV_CACHE_GB_INT8 = 2
+DEFAULT_KV_CACHE_GB_TRANSLATE = 1
 
 
 @dataclass
@@ -39,7 +49,12 @@ class AMCConfig:
     )
     whisper_model_path: str = field(
         default_factory=lambda: os.environ.get(
-            "XILO_WHISPER_PATH", "models/whisper-small-int8-ov"
+            "XILO_WHISPER_PATH", "models/whisper-large-v3-turbo-int8-ov"
+        )
+    )
+    translate_model_path: str = field(
+        default_factory=lambda: os.environ.get(
+            "XILO_TRANSLATE_PATH", "models/translategemma-4b-it-int8-ov"
         )
     )
     cache_dir: str = field(
@@ -47,6 +62,7 @@ class AMCConfig:
     )
     kv_cache_gb: int = DEFAULT_KV_CACHE_GB_INT4
     kv_cache_gb_int8: int = DEFAULT_KV_CACHE_GB_INT8
+    kv_cache_gb_translate: int = DEFAULT_KV_CACHE_GB_TRANSLATE
     allow_cpu_fallback: bool = False
     max_new_tokens_tutor: int = 512
     max_new_tokens_eval: int = 96
@@ -55,6 +71,9 @@ class AMCConfig:
     memory_keep_pairs: int = 3
     job_timeout_s: float = 180.0
     whisper_language: str = "<|en|>"
+    translate_max_input_tokens: int = DEFAULT_TRANSLATE_MAX_INPUT
+    translate_fill_ratio: float = DEFAULT_TRANSLATE_FILL_RATIO
+    max_new_tokens_translate: int = 512
 
     @classmethod
     def mock(cls) -> AMCConfig:

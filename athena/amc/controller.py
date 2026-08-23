@@ -6,13 +6,23 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
 
-from athena.amc.backends import LlamaBackend, WhisperBackend, build_backends
+from athena.amc.backends import (
+    LlamaBackend,
+    TranslatorBackend,
+    WhisperBackend,
+    build_backends,
+)
 from athena.amc.bus import EventBus
 from athena.amc.config import AMCConfig
-from athena.amc.exceptions import RoleError, TTSNotWiredError
-from athena.amc.gpu import resolve_device
+from athena.amc.exceptions import GpuDeadError, RoleError, TTSNotWiredError
+from athena.amc.gpu import gpu_dead_message, is_gpu_dead_error, resolve_device
 from athena.amc.memory import ConversationMemory
 from athena.amc.roles import evaluator_system_prompt, tutor_system_prompt
+from athena.amc.translate import (
+    chunk_for_translator,
+    format_translate_prompt,
+    join_translations,
+)
 from athena.amc.types import (
     AMCStatus,
     Event,
@@ -32,7 +42,7 @@ class _Job:
 
 
 class AMC:
-    """Exclusive GPU scheduler for Llama 3.1 and Whisper.
+    """Exclusive GPU scheduler for Llama, Whisper, and TranslateGemma.
 
     All public methods enqueue work onto a single worker thread. A second
     request never loads a second model: it waits until the current job
@@ -41,6 +51,10 @@ class AMC:
     Conversation text is kept across a Whisper interrupt (speak button).
     KV cache is dropped on unload and the text history is fed back as
     system context when Llama is reloaded. Role end clears memory.
+
+    STT / translator / TTS are stateless hops (product Event G): after the
+    string is passed on, that model holds nothing. Only Llama keeps the
+    same-section lesson thread.
     """
 
     def __init__(
@@ -50,19 +64,29 @@ class AMC:
         llama: LlamaBackend | None = None,
         llama_int8: LlamaBackend | None = None,
         whisper: WhisperBackend | None = None,
+        translator: TranslatorBackend | None = None,
         data_controller: Any | None = None,
     ) -> None:
         self.config = config or AMCConfig()
         self.device = resolve_device(self.config)
-        if llama is None or llama_int8 is None or whisper is None:
-            built_int4, built_int8, built_whisper = build_backends(self.config)
+        if (
+            llama is None
+            or llama_int8 is None
+            or whisper is None
+            or translator is None
+        ):
+            built_int4, built_int8, built_whisper, built_tr = build_backends(
+                self.config
+            )
             llama = llama or built_int4
             llama_int8 = llama_int8 if llama_int8 is not None else built_int8
             whisper = whisper or built_whisper
+            translator = translator or built_tr
         self._llama_int4 = llama
         self._llama_int8 = llama_int8
         self._llama = llama  # tutor alias (INT4)
         self._whisper = whisper
+        self._translator = translator
         self._dc = data_controller
         self.bus = EventBus()
 
@@ -72,6 +96,7 @@ class AMC:
         self._section: Any | None = None
         self._behavioral_level: int = 1
         self._kv_warm = False
+        self._gpu_dead: str | None = None
         self._memory = ConversationMemory(keep_pairs=self.config.memory_keep_pairs)
 
         self._jobs: queue.Queue[_Job | None] = queue.Queue()
@@ -156,6 +181,30 @@ class AMC:
 
         return self._submit(JobKind.TRANSCRIBE, {"pcm": list(pcm_16k)}, timeout)
 
+    def translate(
+        self,
+        text: str,
+        *,
+        source_lang: str,
+        target_lang: str,
+        timeout: float | None = None,
+    ) -> str:
+        """Event G translator hop. Chunks at 75% of 2K, sentence boundaries.
+
+        Same path for student input → English and Llama output → selected
+        language. Unloads after the string is returned (holds no knowledge).
+        """
+
+        return self._submit(
+            JobKind.TRANSLATE,
+            {
+                "text": text,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+            },
+            timeout,
+        )
+
     def talk(self, text: str | None = None) -> None:
         """Talk button — read the last AI reply out loud.
 
@@ -213,6 +262,8 @@ class AMC:
             try:
                 result = self._execute(job)
             except BaseException as exc:
+                if is_gpu_dead_error(exc) and not isinstance(exc, GpuDeadError):
+                    exc = self._poison_gpu(exc)
                 job.future.set_exception(exc)
                 self.bus.emit("job_failed", kind=job.kind.value, error=str(exc))
             else:
@@ -239,6 +290,8 @@ class AMC:
             )
         if kind is JobKind.TRANSCRIBE:
             return self._transcribe(p["pcm"])
+        if kind is JobKind.TRANSLATE:
+            return self._translate(p["text"], p["source_lang"], p["target_lang"])
         if kind is JobKind.LEAVE_ROLE:
             return self._leave_role()
         if kind is JobKind.SHUTDOWN:
@@ -248,23 +301,49 @@ class AMC:
 
     # ----- exclusive residency -----
 
-    def _backend(self, model: ModelId) -> LlamaBackend | WhisperBackend:
+    def _backend(
+        self, model: ModelId
+    ) -> LlamaBackend | WhisperBackend | TranslatorBackend:
         if model is ModelId.LLAMA_INT4:
             return self._llama_int4
         if model is ModelId.LLAMA_INT8:
             return self._llama_int8
+        if model is ModelId.TRANSLATE:
+            return self._translator
         return self._whisper
 
     @staticmethod
     def _is_llama(model: ModelId | None) -> bool:
         return model in (ModelId.LLAMA_INT4, ModelId.LLAMA_INT8)
 
+    def _poison_gpu(self, exc: BaseException) -> GpuDeadError:
+        """-5 OOM poisons the OpenCL queue; later compiles become -14.
+
+        Do not load another model in this process. Unload what we can.
+        """
+
+        dead = GpuDeadError(gpu_dead_message(exc))
+        self._gpu_dead = str(dead)
+        try:
+            self._unload_resident()
+        except Exception:
+            self._resident = None
+        self.bus.emit("gpu_dead", error=str(exc))
+        return dead
+
     def _ensure(self, model: ModelId) -> None:
+        if self._gpu_dead:
+            raise GpuDeadError(self._gpu_dead)
         if self._resident is model:
             return
         self._unload_resident()
         self.bus.emit("model_loading", model=model.value)
-        self._backend(model).load()
+        try:
+            self._backend(model).load()
+        except BaseException as exc:
+            if is_gpu_dead_error(exc):
+                raise self._poison_gpu(exc) from exc
+            raise
         self._resident = model
         self.bus.emit("model_loaded", model=model.value)
 
@@ -353,6 +432,41 @@ class AMC:
         return self._whisper.transcribe(
             pcm, language=self.config.whisper_language
         )
+
+    def _translate(self, text: str, source_lang: str, target_lang: str) -> str:
+        if not (text or "").strip():
+            return ""
+        self._ensure(ModelId.TRANSLATE)
+        cfg = self.config
+        chunks = chunk_for_translator(
+            text,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            count=self._translator.token_count,
+            max_input_tokens=cfg.translate_max_input_tokens,
+            fill_ratio=cfg.translate_fill_ratio,
+        )
+        hard = cfg.translate_max_input_tokens
+        fill_cap = max(32, int(hard * cfg.translate_fill_ratio))
+        pieces: list[str] = []
+        try:
+            for chunk in chunks:
+                prompt = format_translate_prompt(
+                    chunk.text, source_lang=source_lang, target_lang=target_lang
+                )
+                used = self._translator.token_count(prompt)
+                max_new = min(
+                    cfg.max_new_tokens_translate,
+                    fill_cap,
+                    max(32, hard - used),
+                )
+                pieces.append(
+                    self._translator.generate(prompt, max_new_tokens=max_new)
+                )
+            return join_translations(chunks, pieces)
+        finally:
+            # Product: translator holds no knowledge after pass-on.
+            self._unload_resident()
 
     def _leave_role(self) -> list[Turn]:
         snapshot = self._memory.clear()

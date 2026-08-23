@@ -16,3 +16,7 @@ class RoleError(AMCError):
 
 class TTSNotWiredError(AMCError):
     """Talk/TTS is not Whisper. Whisper is speech-to-text only."""
+
+
+class GpuDeadError(AMCError):
+    """Intel GPU OpenCL context is poisoned (-5 / -14). Stop this process."""

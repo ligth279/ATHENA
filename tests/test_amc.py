@@ -7,9 +7,23 @@ import unittest
 from pathlib import Path
 
 from athena.amc import AMC, AMCConfig, Event, LlamaRole, ModelId
-from athena.amc.backends import MockLlamaBackend, MockWhisperBackend, _require_ir_dir
+from athena.amc.config import DEFAULT_KV_CACHE_GB_TRANSLATE
+from athena.amc.backends import (
+    MockLlamaBackend,
+    MockTranslatorBackend,
+    MockWhisperBackend,
+    _require_ir_dir,
+)
 from athena.amc.exceptions import ModelPathError, RoleError, TTSNotWiredError
+from athena.amc.gpu import is_gpu_dead_error, translator_unsafe_reason
 from athena.amc.roles import evaluator_system_prompt, tutor_system_prompt
+from athena.amc.translate import (
+    chunk_for_translator,
+    format_translate_prompt,
+    pack_text,
+    prompt_token_limit,
+    split_sentences,
+)
 
 
 class _SlowLlama(MockLlamaBackend):
@@ -153,36 +167,50 @@ class AMCTests(unittest.TestCase):
             def load(self) -> None:
                 super().load()
                 loads.append("int4")
-                if int8.is_loaded() or whisper.is_loaded():
+                if int8.is_loaded() or whisper.is_loaded() or tr.is_loaded():
                     loads.append("BOTH")
 
         class L8(MockLlamaBackend):
             def load(self) -> None:
                 super().load()
                 loads.append("int8")
-                if int4.is_loaded() or whisper.is_loaded():
+                if int4.is_loaded() or whisper.is_loaded() or tr.is_loaded():
                     loads.append("BOTH")
 
         class W(MockWhisperBackend):
             def load(self) -> None:
                 super().load()
                 loads.append("whisper")
-                if int4.is_loaded() or int8.is_loaded():
+                if int4.is_loaded() or int8.is_loaded() or tr.is_loaded():
+                    loads.append("BOTH")
+
+        class T(MockTranslatorBackend):
+            def load(self) -> None:
+                super().load()
+                loads.append("translate")
+                if int4.is_loaded() or int8.is_loaded() or whisper.is_loaded():
                     loads.append("BOTH")
 
         int4 = L4("llama_int4")
         int8 = L8("llama_int8")
         whisper = W()
+        tr = T()
         amc = AMC(
-            AMCConfig.mock(), llama=int4, llama_int8=int8, whisper=whisper
+            AMCConfig.mock(),
+            llama=int4,
+            llama_int8=int8,
+            whisper=whisper,
+            translator=tr,
         )
         try:
             amc.enter_event_t({"id": "s1"})
             amc.transcribe([0.0])
+            amc.translate("Hello.", source_lang="en", target_lang="hi")
             amc.enter_event_e()
             self.assertNotIn("BOTH", loads)
-            self.assertEqual(loads, ["int4", "whisper", "int8"])
+            self.assertEqual(loads, ["int4", "whisper", "translate", "int8"])
             self.assertFalse(int4.is_loaded())
+            self.assertFalse(tr.is_loaded())
             self.assertTrue(int8.is_loaded())
         finally:
             amc.shutdown()
@@ -211,7 +239,33 @@ class AMCTests(unittest.TestCase):
         self.amc.shutdown()
         self.assertFalse(self.amc._llama.is_loaded())
         self.assertFalse(self.amc._whisper.is_loaded())
+        self.assertFalse(self.amc._translator.is_loaded())
         self.assertIsNone(self.amc.status().resident_model)
+
+    def test_translate_unloads_llama_and_unloads_after(self) -> None:
+        self.amc.enter_event_t({"id": "s1"})
+        self.amc.tutor_ask("explain")
+        out = self.amc.translate("Hello.", source_lang="en", target_lang="hi")
+        self.assertEqual(out, "Hello.")
+        self.assertFalse(self.amc._llama.is_loaded())
+        self.assertFalse(self.amc._translator.is_loaded())
+        self.assertIsNone(self.amc.status().resident_model)
+        self.assertGreater(len(self.amc._memory), 0)
+
+    def test_translate_both_directions_use_chunker(self) -> None:
+        student = "Namaste. How are you?"
+        to_en = self.amc.translate(student, source_lang="hi", target_lang="en")
+        self.assertEqual(to_en, student)
+        answer = "A fraction is a part of a whole. The top is the numerator."
+        to_hi = self.amc.translate(answer, source_lang="en", target_lang="hi")
+        self.assertEqual(to_hi, answer)
+        self.assertFalse(self.amc._translator.is_loaded())
+
+    def test_translate_empty_skips_gpu(self) -> None:
+        out = self.amc.translate("   ", source_lang="en", target_lang="hi")
+        self.assertEqual(out, "")
+        self.assertFalse(self.amc._translator.is_loaded())
+        self.assertEqual(self.amc._translator.calls, [])
 
 
 class IRPathTests(unittest.TestCase):
@@ -247,6 +301,210 @@ class IRPathTests(unittest.TestCase):
             ):
                 (root / name).write_bytes(b"x")
             self.assertEqual(_require_ir_dir(raw, "Llama"), root)
+
+
+class TranslatorKvTests(unittest.TestCase):
+    def test_default_translate_kv_is_one_gb(self) -> None:
+        self.assertEqual(DEFAULT_KV_CACHE_GB_TRANSLATE, 1)
+        self.assertEqual(AMCConfig().kv_cache_gb_translate, 1)
+
+
+class GpuGuardTests(unittest.TestCase):
+    def test_detects_out_of_resources(self) -> None:
+        self.assertTrue(
+            is_gpu_dead_error(
+                RuntimeError("[GPU] clFinish, error code: -5 CL_OUT_OF_RESOURCES")
+            )
+        )
+
+    def test_detects_wait_list(self) -> None:
+        self.assertTrue(
+            is_gpu_dead_error(
+                RuntimeError("CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST")
+            )
+        )
+
+    def test_detects_invalid_event(self) -> None:
+        self.assertTrue(
+            is_gpu_dead_error(RuntimeError("clWaitForEvents, error code: -58 CL_INVALID_EVENT"))
+        )
+
+    def test_ignores_normal_errors(self) -> None:
+        self.assertFalse(is_gpu_dead_error(RuntimeError("missing IR")))
+
+    def test_fp32_embeddings_are_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "openvino_language_model.bin").write_bytes(b"x" * 100)
+            xml = root / "openvino_text_embeddings_model.xml"
+            xml.write_text('<net><layer precision="FP32"/></net>')
+            (root / "openvino_text_embeddings_model.bin").write_bytes(b"y" * 100)
+            (root / "openvino_vision_embeddings_model.xml").write_text(
+                '<net><layer precision="U8"/></net>'
+            )
+            (root / "openvino_vision_embeddings_model.bin").write_bytes(b"v" * 100)
+            reason = translator_unsafe_reason(root)
+            self.assertIsNotNone(reason)
+            self.assertIn("not INT8", reason or "")
+
+    def test_vision_file_is_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "openvino_text_embeddings_model.xml").write_text(
+                '<net><layer precision="U8"/></net>'
+            )
+            vis = root / "openvino_vision_embeddings_model.bin"
+            vis.write_bytes(b"v" * 20_000_000)
+            (root / "openvino_vision_embeddings_model.xml").write_text(
+                '<net><layer precision="FP32"/></net>'
+            )
+            reason = translator_unsafe_reason(root)
+            self.assertIsNotNone(reason)
+            self.assertIn("vision", reason or "")
+            self.assertIn("SigLIP", reason or "")
+
+    def test_missing_vision_xml_is_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "openvino_language_model.bin").write_bytes(b"x" * 100)
+            xml = root / "openvino_text_embeddings_model.xml"
+            xml.write_text('<net><layer precision="U8"/></net>')
+            (root / "openvino_text_embeddings_model.bin").write_bytes(b"y" * 100)
+            reason = translator_unsafe_reason(root)
+            self.assertIsNotNone(reason)
+            self.assertIn("vision IR missing", reason or "")
+
+    def test_large_int8_vision_is_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "openvino_language_model.bin").write_bytes(b"x" * 100)
+            (root / "openvino_text_embeddings_model.xml").write_text(
+                '<net><layer precision="U8"/></net>'
+            )
+            (root / "openvino_text_embeddings_model.bin").write_bytes(b"y" * 100)
+            (root / "openvino_vision_embeddings_model.xml").write_text(
+                '<net><layer precision="U8"/></net>'
+            )
+            (root / "openvino_vision_embeddings_model.bin").write_bytes(
+                b"v" * 20_000_000
+            )
+            reason = translator_unsafe_reason(root)
+            self.assertIsNotNone(reason)
+            self.assertIn("SigLIP", reason or "")
+
+    def test_vision_stub_with_int8_embeddings_is_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "openvino_language_model.bin").write_bytes(b"x" * 100)
+            (root / "openvino_text_embeddings_model.xml").write_text(
+                '<net><layer precision="U8"/></net>'
+            )
+            (root / "openvino_text_embeddings_model.bin").write_bytes(b"y" * 100)
+            (root / "openvino_vision_embeddings_model.xml").write_text("<net/>")
+            (root / "openvino_vision_embeddings_model.bin").write_bytes(b"v" * 100)
+            self.assertIsNone(translator_unsafe_reason(root))
+
+
+class ChunkerTests(unittest.TestCase):
+    def test_prompt_limit_is_75_percent_of_2k(self) -> None:
+        self.assertEqual(prompt_token_limit(2048, 0.75), 1536)
+
+    def test_split_keeps_full_sentences(self) -> None:
+        text = "Hello there. How are you? I am fine."
+        parts = split_sentences(text)
+        self.assertGreaterEqual(len(parts), 2)
+        self.assertEqual("".join(parts), text)
+        self.assertTrue(parts[0].strip().endswith("."))
+        self.assertNotIn("How", parts[0])
+
+    def test_does_not_split_mr_or_decimal(self) -> None:
+        text = "Ask Mr. Shah about 3.14 and then stop."
+        parts = split_sentences(text)
+        self.assertEqual("".join(parts), text)
+        self.assertEqual(len(parts), 1)
+
+    def test_danda_is_a_sentence_end(self) -> None:
+        text = "यह एक वाक्य है। दूसरा वाक्य है।"
+        parts = split_sentences(text)
+        self.assertEqual("".join(parts), text)
+        self.assertGreaterEqual(len(parts), 2)
+
+    def test_pack_cuts_after_sentence_under_limit(self) -> None:
+        text = "One sentence here. Two sentence here. Three sentence here."
+        chunks = pack_text(text, count=lambda s: len(s.split()), limit=6)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(c.text for c in chunks), text)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk.text.split()), 6)
+            stripped = chunk.text.strip()
+            self.assertTrue(
+                stripped.endswith(".") or chunk is chunks[-1],
+                msg=chunk.text,
+            )
+
+    def test_chunk_for_translator_counts_full_prompt(self) -> None:
+        def count(s: str) -> int:
+            return len(s)
+
+        text = "Alpha is first. Beta is second. Gamma is third. Delta is fourth."
+        chunks = chunk_for_translator(
+            text,
+            source_lang="en",
+            target_lang="hi",
+            count=count,
+            max_input_tokens=600,
+            fill_ratio=0.75,
+        )
+        limit = prompt_token_limit(600, 0.75)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(c.text for c in chunks), text)
+        for chunk in chunks:
+            prompt = format_translate_prompt(
+                chunk.text, source_lang="en", target_lang="hi"
+            )
+            self.assertLessEqual(count(prompt), limit)
+
+    def test_oversize_sentence_last_resort_does_not_drop(self) -> None:
+        text = "word " * 40
+        chunks = pack_text(text, count=lambda s: len(s.split()), limit=5)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(c.text for c in chunks), text)
+
+    def test_long_paragraph_is_chunked_not_dropped(self) -> None:
+        sentences = [
+            f"Sentence number {i} explains a piece of the fraction lesson."
+            for i in range(1, 25)
+        ]
+        text = " ".join(sentences)
+        chunks = chunk_for_translator(
+            text,
+            source_lang="en",
+            target_lang="hi",
+            count=len,
+            max_input_tokens=600,
+            fill_ratio=0.75,
+        )
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(c.text for c in chunks), text)
+        limit = prompt_token_limit(600, 0.75)
+        for chunk in chunks:
+            prompt = format_translate_prompt(
+                chunk.text, source_lang="en", target_lang="hi"
+            )
+            self.assertLessEqual(len(prompt), limit)
+
+    def test_one_short_sentence_is_a_single_chunk(self) -> None:
+        text = "What is a fraction, in one short sentence?"
+        chunks = chunk_for_translator(
+            text,
+            source_lang="en",
+            target_lang="hi",
+            count=lambda s: max(1, len(s) // 4),
+            max_input_tokens=2048,
+            fill_ratio=0.75,
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].text, text)
 
 
 if __name__ == "__main__":

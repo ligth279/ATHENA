@@ -29,6 +29,7 @@ class ModelId(str, Enum):
     LLAMA_INT4 = "llama_int4"  # tutor — 4 GB KV
     LLAMA_INT8 = "llama_int8"  # evaluator — 2 GB KV
     WHISPER = "whisper"
+    TRANSLATE = "translate"  # Event G hop — TranslateGemma 4B INT8
 
 
 class JobKind(str, Enum):
@@ -36,6 +37,7 @@ class JobKind(str, Enum):
     ASK = "ask"
     HINT = "hint"
     TRANSCRIBE = "transcribe"
+    TRANSLATE = "translate"
     LEAVE_ROLE = "leave_role"
     SHUTDOWN = "shutdown"
 

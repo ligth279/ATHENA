@@ -18,6 +18,9 @@ ov_cache/
 .cache/
 *.ovcache
 *.part
+*.blob
+*.cl_cache
+*-vision-bak/
 
 # OpenVINO IR blobs if they land outside models/
 *.bin
@@ -25,6 +28,10 @@ ov_cache/
 
 # Audio dumps
 *.wav
+
+# Editor / Grok session
+.grok/
+*.swp
 
 # Download / pip / nohup noise
 *.log

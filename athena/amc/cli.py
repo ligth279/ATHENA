@@ -40,6 +40,8 @@ def _base_config(*, timeout: float) -> AMCConfig:
         backend="openvino",
         llama_model_path=str(root / "models" / "llama-3.1-8b-instruct-int4-ov"),
         llama_int8_path=str(root / "models" / "llama-3.1-8b-instruct-int8-ov"),
+        whisper_model_path=str(root / "models" / "whisper-large-v3-turbo-int8-ov"),
+        translate_model_path=str(root / "models" / "translategemma-4b-it-int8-ov"),
         cache_dir=str(root / "models" / "ov_cache"),
         kv_cache_gb=4,
         kv_cache_gb_int8=2,
@@ -93,6 +95,12 @@ def cmd_status(_: argparse.Namespace) -> int:
     print(f"  llama INT4:  {cfg.llama_model_path}  (KV {cfg.kv_cache_gb} GB)")
     print(f"  llama INT8:  {cfg.llama_int8_path}  (KV {cfg.kv_cache_gb_int8} GB)")
     print(f"  whisper:     {cfg.whisper_model_path}")
+    print(f"  translate:   {cfg.translate_model_path}")
+    print(
+        f"  translate cap: {int(cfg.translate_max_input_tokens * cfg.translate_fill_ratio)}"
+        f" / {cfg.translate_max_input_tokens} tokens "
+        f"({cfg.translate_fill_ratio:.0%} fill, sentence chunks)"
+    )
     print(f"  ov cache:    {cfg.cache_dir}")
     return 0
 
@@ -172,6 +180,34 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_translate(args: argparse.Namespace) -> int:
+    cfg = _base_config(timeout=args.timeout)
+    ir = Path(cfg.translate_model_path)
+    if not (ir / "openvino_language_model.bin").is_file():
+        print(
+            f"missing TranslateGemma IR at {ir}\n"
+            "run: python scripts/download_translategemma.py --compress-only",
+            file=sys.stderr,
+        )
+        return 2
+    t0 = time.perf_counter()
+    try:
+        with AMC(cfg) as amc:
+            print(
+                f"xilo TranslateGemma  {args.source} -> {args.target}  "
+                f"{cfg.translate_fill_ratio:.0%} of {cfg.translate_max_input_tokens} tokens"
+            )
+            out = amc.translate(
+                args.text, source_lang=args.source, target_lang=args.target
+            )
+            print(out)
+            print(f"  [{time.perf_counter() - t0:.1f}s] {amc.status().resident_model}")
+    except ModelPathError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m athena.amc")
     sub = p.add_subparsers(dest="cmd")
@@ -208,6 +244,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="paragraph-style closeness (default: exact)",
     )
     e.set_defaults(func=cmd_eval)
+
+    g = sub.add_parser(
+        "translate",
+        help="TranslateGemma 4B INT8 hop (sentence chunks at 75% of 2K)",
+    )
+    g.add_argument("text", help="text to translate")
+    g.add_argument("--source", default="en", help="source language code")
+    g.add_argument("--target", default="hi", help="target language code")
+    g.add_argument("--timeout", type=float, default=900.0)
+    g.set_defaults(func=cmd_translate)
     return p
 
 

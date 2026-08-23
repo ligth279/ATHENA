@@ -170,5 +170,52 @@ SECTION 5 website
 
                                 one it is  done  ai is supposed to then generate the clue
                                 based on type and  ans
+                                Same-section speak: keep. New section or quiz: should not drag the old thread in RAM.
+                                that is if the quiz is successful then there no need for doubt to be carryover
 
-there was i  event G but i for got what it was guess i will add it later :)
+
+   >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>system at  event g<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+   aah now i remeber
+   event g is more  like sub state   the system is in  momentarily  when the user clicks ethier labguage or speech or speak button
+
+   here amc has huge role as  it need manage between  mutliple ai models
+   wording: not "at once" in VRAM. one model resident, then pass the text on, then kill that model.
+   sst / tts / transilator hold NO knowlegde after the result is passed on.
+   next sst / tts / transilation does not depend on the last one.
+   only llama keeps lesson thread (same section). successful quiz = no doubt carryover.
+   senerio 1  language
+      the user wants ans to be in a specific language but ai model best works in english
+       so in this case there are 2 sub senrio too
+            1,user is typing in enlgish (ex: most moden keyboards are in english) but wants ans in another language
+                    in such case  keyboard -> english -> llama model ->ans -> transilator-> specifc lang -> output
+            2, user types and wants ans in that specifc language
+                    in such case  keyboard -> specifc lang ->transilator -> llama model ->ans -> transilator-> specifc lang -> output
+    senrio 2  speech
+            or sst
+             in such a case user will speak in a selected language
+                there for amc will  need to transilte that language into english first and then pass it to the llama model and then transilate the ans back to the selected language
+                sst -> transilator -> english -> llama model -> ans -> transilator -> specifc lang -> output
+    senrio 3 speak
+         tts
+         in such a case user need to hear in a selected language
+                there for amc then pass it to the llama model and then transilate the ans back to the selected language
+                llama model -> ans -> transilator -> specifc lang -> tts
+    this events are not mutually exclusive
+      as a person  can use senrio 1 and 3 in a sequence
+           first use senrio 1 to type in english and then use senrio 3 to hear in a selected language
+            keyboard -> specifc lang ->transilator -> llama model ->ans -> transilator-> specifc lang -> tts -> output
+                    *here note that  tts is added to senerio one  rather than repeating the entire process
+            or use senrio 2 and 3 in a sequence
+            sst -> transilator -> english -> llama model -> ans -> transilator -> specifc lang -> tts -> output
+                       *here note that  tts is added to senerio two  rather than repeating the entire process
+            or use senrio 1 and 2 in a sequence
+             sst -> specifc lang ->transilator -> english -> llama model ->ans -> transilator-> specific lang  -> output
+                       *here note that  sst is added to senerio one  rather than repeating the entire process
+            likewise all 3 can be used in a sequence
+            therefore it is reccamend to build in a way that either rba or sub process controller can be used to control the flow that can change dynamically
+            depending on the combination of all mentioned and non mentioned senirio
+            and connect each part of flow only when it is required
+            this section is for ai{
+            ther can be mulitple senerio that devs may consider then  decide not to add
+            there for it is reccamended to consult a dev before adding any new senrio
+            }
