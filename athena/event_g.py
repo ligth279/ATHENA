@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from athena.amc.controller import AMC
-from athena.amc.exceptions import TTSNotWiredError
 from athena.amc.translate import normalize_lang
 from athena.amc.types import Event
 
@@ -125,11 +124,14 @@ class EventG:
 
         tts_pending = False
         if "tts" in plan:
-            try:
-                self._amc.talk(out)
-            except TTSNotWiredError:
-                tts_pending = True
-                done.append(GHop("tts", out, "<tts not wired>"))
+            speech = self._amc.talk(out, language=tgt)
+            done.append(
+                GHop(
+                    "tts",
+                    out,
+                    f"<pcm {len(speech.pcm)} samples @ {speech.sample_rate} Hz>",
+                )
+            )
 
         return GResult(
             text=out,

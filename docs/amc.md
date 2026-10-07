@@ -8,13 +8,13 @@ Maintainer map for `athena/amc/`. Product rules: **section 2** of `docu.txt`. Th
 
 Hardware: **Intel Arc B580 12 GB** + **i5-10400F** (no iGPU) + **16 GB DDR4**. OpenVINO device `"GPU"` is the B580.
 
-Runtime: OpenVINO **2026.3** + `openvino-genai`. Not PyTorch. Not IPEX. Not bitsandbytes. Not NVIDIA.
+Runtime: OpenVINO **2026.4.1** + `openvino-genai`. Not PyTorch. Not IPEX. Not bitsandbytes. Not NVIDIA.
 
 ---
 
 ## What it does
 
-One GPU resident at a time: **Llama INT4** or **Llama INT8** or **Whisper** or **TranslateGemma**. A single worker queue waits out the current job, then unloads and switches.
+One GPU resident at a time: **Llama INT4** or **Llama INT8** or **Whisper** or **TranslateGemma** or **OmniVoice TTS**. A single worker queue waits out the current job, then unloads and switches.
 
 | Role | Event | IR | KV | Why |
 |---|---|---|---|---|
@@ -22,10 +22,11 @@ One GPU resident at a time: **Llama INT4** or **Llama INT8** or **Whisper** or *
 | EVALUATOR | E | INT8 ~7.5 GB | **2 GB** | Quiz turns are short. 7.5+4 would OOM. |
 | Speak (STT) | — | Whisper turbo INT8 | n/a | Exclusive hop |
 | Translator | G hop | TranslateGemma 4B language **INT8** ~3.62 GB + text emb **INT8** ~0.63 GB + **vision stub** ~1.3 MB. | n/a | Stateless. 2K, ≤75%, sentence chunks. `VLMPipeline` still opens a vision xml; SigLIP must not be that file. |
+| Talk (TTS) | G hop | OmniVoice 0.2.1 FP16 (`forward.xml` + `decode.xml`) | n/a | Stateless. OpenVINO `"GPU"` embed + unmask + decode. Unloads after the wav. Not Whisper. |
 
-Never two of these in VRAM. Compile caches: `models/ov_cache/int4`, `int8`, `translate`.
+Never two of these in VRAM. Compile caches: `models/ov_cache/int4`, `int8`, `translate`, `omnivoice`.
 
-Talk/TTS is **not** Whisper. `amc.talk()` raises `TTSNotWiredError`.
+Talk/TTS is **not** Whisper. `amc.talk()` speaks a string (or the last tutor reply) on OmniVoice FP16, then unloads.
 
 ---
 
@@ -37,7 +38,7 @@ Do not add a second load path.
 caller → AMC.public_method() → queue → amc-worker
                                        ├─ _execute(job)
                                        ├─ _ensure(model)   # unload other, load this
-                                       └─ INT4 / INT8 / Whisper / Translate backend
+                                       └─ INT4 / INT8 / Whisper / Translate / TTS backend
 ```
 
 Public methods only enqueue. Only `_ensure` / `_unload_resident` touch VRAM.
@@ -49,14 +50,15 @@ Public methods only enqueue. Only `_ensure` / `_unload_resident` touch VRAM.
 | File | Job |
 |---|---|
 | `controller.py` | Queue, exclusive slot, Event T/E + G hops |
-| `backends.py` | OpenVINO GenAI INT4, INT8, Whisper, TranslateGemma + mocks |
+| `backends.py` | OpenVINO GenAI INT4, INT8, Whisper, TranslateGemma + OmniVoice TTS + mocks |
+| `tts.py` | OmniVoice FP16: GPU `forward` + GPU `decode`, numpy unmask loop |
 | `translate.py` | Official TranslateGemma prompt + 75% sentence chunker |
 | `roles.py` | Tutor / evaluator **prompts** |
 | `memory.py` | RAM conversation text (not GPU KV) |
 | `config.py` | Paths, KV budgets, token/temp knobs |
 | `gpu.py` | Device `"GPU"`, per-model `CACHE_DIR` |
-| `cli.py` | `python -m athena.amc status\|tutor\|eval\|translate` |
-| `types.py` | `ModelId` includes `TRANSLATE` |
+| `cli.py` | `python -m athena.amc status\|tutor\|eval\|translate\|talk` |
+| `types.py` | `ModelId` includes `TRANSLATE` and `TTS` |
 | `event_g.py` (Athena) | Event G hop planner + combinator |
 | `noise.py` | Word-slip / WER helpers for hop stacking |
 | `tests/test_amc.py` | Mock tests (no GPU) |
@@ -82,6 +84,7 @@ Public methods only enqueue. Only `_ensure` / `_unload_resident` touch VRAM.
 | `translate_max_input_tokens` | 2048 | TranslateGemma card input window |
 | `translate_fill_ratio` | 0.75 | Never feed more than this fraction |
 | `max_new_tokens_translate` | 512 | per-chunk generate cap |
+| `tts_num_step` | 16 | OmniVoice unmask steps (paper default 32) |
 
 Env: `XILO_DEVICE`, `XILO_AMC_BACKEND`, `XILO_LLAMA_PATH`, `XILO_LLAMA_INT8_PATH`, `XILO_WHISPER_PATH`, `XILO_TRANSLATE_PATH`, `XILO_OV_CACHE`.
 
@@ -122,6 +125,7 @@ Constructor: `llama=` (INT4), `llama_int8=` (INT8), `whisper=`, `translator=`, `
 | INT4 tutor | `transcribe` | unload INT4, load Whisper; **Llama RAM history kept**; Whisper holds nothing |
 | Whisper done | next hop | **unload Whisper immediately** (no STT KV / no STT memory). Text is passed on. |
 | any | `translate` | unload resident, load TranslateGemma, chunk at 75% of 2K on **full sentences**, generate each chunk, **unload** (holds nothing) |
+| any | `talk` | unload resident, load OmniVoice FP16, speak, **unload** (holds nothing). 24 kHz PCM. |
 | Event T | Event E | clear tutor memory, unload INT4, load INT8 (2 GB KV) |
 | Event E | `evaluator_hint` | one-shot `start_chat` / generate / `finish_chat` |
 | any | `shutdown` | unload resident, stop worker |
@@ -143,6 +147,7 @@ Two memories, and they are **only Llama’s**:
 | `models/llama-3.1-8b-instruct-int8-ov` | **Ready.** `openvino_model.bin` = 8035958805 bytes. GPU-tested. |
 | `models/whisper-large-v3-turbo-int8-ov` | **Ready.** Encoder 645332592, decoder 172534710. GPU-tested (JFK). |
 | `models/translategemma-4b-it-int8-ov` | Language INT8 ~3.62 GB, text emb INT8 ~0.63 GB, **vision stub ~1.3 MB** (SigLIP 407 MB in `*-vision-bak`). Culprit of generate `-5` was SigLIP, not sentence length. Do not restore SigLIP into the runtime folder. |
+| `models/omnivoice-fp16-ov` | **Ready.** OmniVoice 0.2.1 FP16 IR: `forward.xml` + `decode.xml`. GPU embed/decode. PyTorch was export-only. |
 | `models/ov_cache/int4` | ~5.2 GB blob. Cached INT4 load ~4–8 s |
 | `models/ov_cache/int8` | **7.5 GB blob.** If this file is missing/truncated (~6 MB leftover), INT8 “first compile” is minutes and can look hung. Cached INT8 ~4.4 s |
 | `models/ov_cache/translate` | VLM kernels. Safe to delete after a `-5`; next load rebuilds |
@@ -204,8 +209,10 @@ python -m athena.amc tutor "What is a fraction, in one short sentence?"
 python -m athena.amc tutor                  # REPL, type quit
 python -m athena.amc eval --question "What is 2+2?" --answer "5"
 python -m athena.amc translate --source en --target hi "A fraction is a part of a whole."
+python -m athena.amc talk "A fraction is a part of a whole." --language en
 python scripts/download_translategemma.py --compress-only   # INT8 emb + vision stub; no Kaggle re-fetch
 python scripts/event_g_live.py             # Llama T + TranslateGemma; 512-token caps
+python scripts/tts_live.py                 # OmniVoice TTS hop + optional Whisper WER
 python scripts/switch_models.py             # INT4 ↔ INT8 exclusive slot
 python -m unittest tests.test_amc tests.test_event_g -q
 ```
@@ -214,7 +221,7 @@ python -m unittest tests.test_amc tests.test_event_g -q
 
 ## Backends
 
-`build_backends` returns `(int4, int8, whisper, translator)`. Mock mode adds `MockTranslatorBackend` (identity). OpenVINO imported only inside `load()`.
+`build_backends` returns `(int4, int8, whisper, translator, tts)`. Mock mode adds `MockTranslatorBackend` (identity) and `MockTTSBackend`. OpenVINO imported only inside `load()`. PyTorch is not imported at runtime.
 
 Translator: raw TranslateGemma user-turn string (not GenAI's Gemma 3 chat wrapper). Chunker in `translate.py` applies to **both** student→English and Llama-answer→selected-language. Cut only after `. ? ! … । ॥` (and CJK/Arabic enders). `Mr.` / `3.14` are not cuts. A single sentence over budget is last-resort split on `; ,` then words.
 
@@ -242,9 +249,9 @@ Parked on purpose until the named owner exists, or still missing IR.
 |---|---|---|
 | Whisper STT (`OpenVINO/whisper-large-v3-turbo-int8-ov`) | **Ready, exclusive + sequential GPU-tested** | 16 kHz PCM. Language tag `<\|en\|>`. espeak WER 12.5% (*whole→bowl*). |
 | Audio resample | Not in AMC | Website must send 16 kHz, or add a helper later. |
-| TTS / `talk()` | Raises `TTSNotWiredError` | Event G hop: speak the string → **unload**. Not Whisper. Needs `Text2SpeechPipeline`. |
+| TTS / `talk()` | **Wired.** OmniVoice 0.2.1 FP16 IR on GPU | Event G hop: speak the string → **unload**. Not Whisper. Embed + decode graphs on `"GPU"`. |
 | Translator | **Wired.** Language+emb INT8, vision stub. Sentence, paragraph, Event G GPU-tested. | hi→en **60% WER** on `भिन्न` vs “fraction”. Glossary is an Athena/Event G hop payload, not a second AMC model. |
-| Event G combinator | **Mimic in Athena** | Exclusive hops work (USM 0 between). `python scripts/event_g_live.py`. TTS still `tts_pending`. |
+| Event G combinator | **Mimic in Athena** | Exclusive hops work (USM 0 between). `python scripts/event_g_live.py`. TTS hop is `talk()`. |
 | Per-language Whisper | One path in config | Swap `whisper_model_path` later; still one resident, still stateless. |
 
 ### Wait for RBA / ALE / Athena (do not guess in AMC now)
@@ -268,7 +275,7 @@ Parked on purpose until the named owner exists, or still missing IR.
 
 ### Done (do not re-open)
 
-Exclusive GPU slot; INT4 tutor (4 GB KV); INT8 evaluator (2 GB KV); queue waits; IR completeness (no `.part` as ready); CLI `status` / `tutor` / `eval`; `scripts/switch_models.py`; live B580 switch INT4 ↔ INT8; talk is not Whisper; quiz clears **Llama** RAM; same-section STT keeps **Llama** RAM only (Whisper itself keeps nothing; GPU STT untested until IR is fetched).
+Exclusive GPU slot; INT4 tutor (4 GB KV); INT8 evaluator (2 GB KV); queue waits; IR completeness (no `.part` as ready); CLI `status` / `tutor` / `eval` / `translate` / `talk`; `scripts/switch_models.py`; live B580 switch INT4 ↔ INT8; OmniVoice TTS hop unloads; quiz clears **Llama** RAM; same-section STT keeps **Llama** RAM only (Whisper itself keeps nothing).
 
 ---
 
@@ -278,8 +285,8 @@ Exclusive GPU slot; INT4 tutor (4 GB KV); INT8 evaluator (2 GB KV); queue waits;
 
 | Test | Guards |
 |---|---|
-| `test_never_two_models_loaded` | INT4 / INT8 / Whisper exclusive |
+| `test_never_two_models_loaded` | INT4 / INT8 / Whisper / Translate / TTS exclusive |
 | `test_event_e_uses_int8_not_int4` | quiz loads INT8, unloads INT4 |
 | `test_second_request_waits_for_first` | queue |
 | `test_tutor_after_whisper_reloads_llama_with_history` | RAM history |
-| `test_talk_is_not_whisper` | TTS not STT |
+| `test_talk_is_not_whisper` | TTS not STT; unloads after speak |

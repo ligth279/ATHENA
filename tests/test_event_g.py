@@ -83,7 +83,7 @@ class EventGMockTests(unittest.TestCase):
         self.assertEqual(out.english_question, "what does this paragraph mean")
         self.assertFalse(self.amc._whisper.is_loaded())
 
-    def test_speak_marks_tts_pending(self) -> None:
+    def test_speak_runs_tts_and_unloads(self) -> None:
         out = self.g.run(
             text="what is a fraction?",
             source_lang="en",
@@ -91,8 +91,11 @@ class EventGMockTests(unittest.TestCase):
             speak=True,
         )
         self.assertIn("tts", out.plan)
-        self.assertTrue(out.tts_pending)
+        self.assertFalse(out.tts_pending)
         self.assertEqual(out.hops[-1].name, "tts")
+        self.assertIn("<pcm", out.hops[-1].output_text)
+        self.assertFalse(self.amc._tts.is_loaded())
+        self.assertIsNone(self.amc.status().resident_model)
 
 
 class NoiseTests(unittest.TestCase):

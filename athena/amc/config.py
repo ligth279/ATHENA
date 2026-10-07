@@ -57,6 +57,11 @@ class AMCConfig:
             "XILO_TRANSLATE_PATH", "models/translategemma-4b-it-int8-ov"
         )
     )
+    tts_model_path: str = field(
+        default_factory=lambda: os.environ.get(
+            "XILO_TTS_PATH", "models/omnivoice-fp16-ov"
+        )
+    )
     cache_dir: str = field(
         default_factory=lambda: os.environ.get("XILO_OV_CACHE", "models/ov_cache")
     )
@@ -74,6 +79,14 @@ class AMCConfig:
     translate_max_input_tokens: int = DEFAULT_TRANSLATE_MAX_INPUT
     translate_fill_ratio: float = DEFAULT_TRANSLATE_FILL_RATIO
     max_new_tokens_translate: int = 512
+    tts_num_step: int = 16  # OmniVoice default 32; 16 is a faster B580 hop
+    # numpy = recommended (Seed-TTS 1.69%, hot 0.38 s/line).
+    # gpu = experimental FP32 CFG graph (1.72%, hot 0.98 s/line).
+    tts_cfg: str = "numpy"
+    tts_guidance_scale: float = 2.0
+    tts_t_shift: float = 0.1
+    tts_layer_penalty: float = 5.0
+    tts_position_temperature: float = 5.0
 
     @classmethod
     def mock(cls) -> AMCConfig:

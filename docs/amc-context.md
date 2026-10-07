@@ -1,6 +1,6 @@
 # AMC handoff (read this after compression / in a new chat)
 
-Product: `docu.txt` Event G (~177). Maintainer map: `docs/amc.md`. Hardware: Arc **B580 12 GB**, no NVIDIA/CUDA/IPEX/bitsandbytes. OpenVINO 2026.3 + genai.
+Product: `docu.txt` Event G (~177). Maintainer map: `docs/amc.md`. Hardware: Arc **B580 12 GB**, no NVIDIA/CUDA/IPEX/bitsandbytes. OpenVINO 2026.4.1 + genai.
 
 This file exists because session context was full. After INT8 embedding compress (or if a live compile already ran), do **not** re-download 12.8 GB from Kaggle.
 
@@ -57,7 +57,7 @@ Once `-5` or `-14` prints: **do not** load the next model in that same Python pr
 
 ### Exclusive GPU (never stack)
 
-One resident: Llama INT4 **or** Llama INT8 **or** Whisper **or** TranslateGemma. Event G is a **queue of hops**, not coresident VRAM.
+One resident: Llama INT4 **or** Llama INT8 **or** Whisper **or** TranslateGemma **or** OmniVoice TTS. Event G is a **queue of hops**, not coresident VRAM.
 
 - **Llama T** = INT4 tutor (`enter_event_t` / `tutor_ask`). Event G uses this.
 - **Llama E** = INT8 evaluator. **Do not** use it for Event G.
@@ -73,7 +73,7 @@ One resident: Llama INT4 **or** Llama INT8 **or** Whisper **or** TranslateGemma.
 | en type → hi out | llama → translate_out |
 | hi type → hi out | translate_in → llama → translate_out |
 | hi speech → hi out | stt → translate_in → llama → translate_out |
-| + speak | same + tts (`tts_pending`; `talk()` still `TTSNotWiredError`) |
+| + speak | same + tts (`amc.talk()` OmniVoice FP16 GPU hop, then unload) |
 
 Connect a hop only if that flag needs it. STT/translator unload after pass-on.
 
@@ -211,7 +211,7 @@ Language must have U8. Text embeddings should too after `--compress-only`.
 |---|---|
 | Embedding INT8 + vision stub | **Done.** Text emb 0.63 GB U8. Runtime vision is the 1.3 MB stub. SigLIP stays in `*-vision-bak`. |
 | Live GPU Event G after KV cap | All four models exclusive + sequential GPU-tested (174.7 s). Channel WER: Whisper 12.5% (*whole→bowl* espeak), Gemma hi→en **60%** (`भिन्न`→difference). Do not WER Llama vs the question. Caps: 512. See `docs/amc.md` WER section. |
-| TTS `Text2SpeechPipeline` | later |
+| TTS OmniVoice FP16 GPU hop | **Wired** (`amc.talk()`). Not GenAI Text2SpeechPipeline. |
 | Athena REST combinator (real, not mimic) | Athena |
 | RBA closeness / new-section RAM | wait for RBA |
 | Official data-aware Llama INT4 | optional, RAM-tight |
