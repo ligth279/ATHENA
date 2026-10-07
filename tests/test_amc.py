@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from athena.amc import AMC, AMCConfig, Event, LlamaRole, ModelId
 from athena.amc.config import DEFAULT_KV_CACHE_GB_TRANSLATE
@@ -15,7 +16,8 @@ from athena.amc.backends import (
     _require_ir_dir,
 )
 from athena.amc.exceptions import ModelPathError, RoleError
-from athena.amc.tts import MockTTSBackend, _unmask_schedule
+from athena.amc.tts import MockTTSBackend, TTSOVBackend, _unmask_schedule
+from athena.amc.tts_tokenizer import JsonBpeTokenizer
 from athena.amc.gpu import is_gpu_dead_error, translator_unsafe_reason
 from athena.amc.roles import evaluator_system_prompt, tutor_system_prompt
 from athena.amc.translate import (
@@ -327,6 +329,119 @@ class TTSHelperTests(unittest.TestCase):
         self.assertEqual(len(sched), 16)
         self.assertEqual(sum(sched), 25 * 8)
         self.assertTrue(all(n >= 0 for n in sched))
+
+
+def _stub_tts_ir(root: Path) -> None:
+    for name in (
+        "forward.xml",
+        "forward.bin",
+        "decode.xml",
+        "decode.bin",
+        "tokenizer.json",
+    ):
+        if name == "tokenizer.json":
+            (root / name).write_text(
+                '{"model":{"type":"BPE","vocab":{"a":0},"merges":[]},"added_tokens":[]}\n',
+                encoding="utf-8",
+            )
+        else:
+            (root / name).write_bytes(b"x")
+
+
+class _FakeCompiled:
+    def create_infer_request(self) -> object:
+        return object()
+
+
+class TTSLoadAtomicTests(unittest.TestCase):
+    def test_decode_compile_failure_leaves_backend_unloaded(self) -> None:
+        class Core:
+            def compile_model(self, model, device, props=None):  # noqa: ANN001
+                path = str(model)
+                if "decode" in path:
+                    raise RuntimeError("decode compile failed")
+                return _FakeCompiled()
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _stub_tts_ir(root)
+            cfg = AMCConfig(
+                backend="openvino",
+                device="CPU",
+                allow_cpu_fallback=True,
+                tts_model_path=str(root),
+            )
+            backend = TTSOVBackend(cfg)
+            with patch("openvino.Core", Core):
+                with self.assertRaisesRegex(RuntimeError, "decode compile failed"):
+                    backend.load()
+            self.assertFalse(backend.is_loaded())
+            self.assertIsNone(backend._fwd)
+            self.assertIsNone(backend._dec)
+            self.assertIsNone(backend._core)
+
+    def test_cfg_compile_failure_drops_forward_and_decode(self) -> None:
+        class Core:
+            def __init__(self) -> None:
+                self.n = 0
+
+            def compile_model(self, model, device, props=None):  # noqa: ANN001
+                self.n += 1
+                if self.n >= 3:
+                    raise RuntimeError("cfg compile failed")
+                return _FakeCompiled()
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _stub_tts_ir(root)
+            cfg = AMCConfig(
+                backend="openvino",
+                device="CPU",
+                allow_cpu_fallback=True,
+                tts_model_path=str(root),
+                tts_cfg="gpu",
+            )
+            backend = TTSOVBackend(cfg)
+            with patch("openvino.Core", Core):
+                with self.assertRaisesRegex(RuntimeError, "cfg compile failed"):
+                    backend.load()
+            self.assertFalse(backend.is_loaded())
+            self.assertIsNone(backend._fwd)
+            self.assertIsNone(backend._cfg)
+
+    def test_ensure_unloads_backend_when_load_raises(self) -> None:
+        class BoomTTS(MockTTSBackend):
+            def load(self) -> None:
+                self._loaded = True
+                self.calls.append("load")
+                raise RuntimeError("compile fail")
+
+        tts = BoomTTS()
+        amc = AMC(AMCConfig.mock(), tts=tts)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "compile fail"):
+                amc.talk("A fraction is a part of a whole.")
+            self.assertFalse(tts.is_loaded())
+            self.assertIn("unload", tts.calls)
+            self.assertIsNone(amc.status().resident_model)
+        finally:
+            amc.shutdown()
+
+
+class JsonBpeTokenizerTests(unittest.TestCase):
+    def test_lang_tags_are_single_ids(self) -> None:
+        local = Path("models/omnivoice-fp16-ov/tokenizer.json")
+        docs = Path("/home/light/Documents/projectxi1/models/omnivoice-fp16-ov/tokenizer.json")
+        path = local if local.is_file() else docs
+        if not path.is_file():
+            self.skipTest("OmniVoice tokenizer.json not in this checkout")
+        tok = JsonBpeTokenizer(path)
+        ids = tok.encode(
+            "<|lang_start|>en<|lang_end|><|instruct_start|>None<|instruct_end|>"
+        )
+        self.assertEqual(ids, [151670, 268, 151671, 151672, 4064, 151673])
+        gold = tok.encode("<|text_start|>A fraction is a part of a whole.<|text_end|>")
+        self.assertEqual(gold, [151674, 32, 19419, 374, 264, 949, 315, 264, 4361, 13, 151675])
 
 
 class IRPathTests(unittest.TestCase):

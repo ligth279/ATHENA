@@ -27,6 +27,7 @@ from athena.amc.config import AMCConfig
 from athena.amc.exceptions import ModelPathError
 from athena.amc.gpu import compile_cache_kwargs, drop_pipeline, resolve_device
 from athena.amc.tts_duration import RuleDurationEstimator
+from athena.amc.tts_tokenizer import JsonBpeTokenizer
 from athena.amc.types import Speech
 
 
@@ -233,10 +234,8 @@ class TTSOVBackend(TTSBackend):
                 f"TTS hop requires OpenVINO device GPU (got {self.device})."
             )
         import openvino as ov
-        from tokenizers import Tokenizer
 
-        self._tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
-        self._core = ov.Core()
+        tokenizer = JsonBpeTokenizer(model_dir / "tokenizer.json")
         props = compile_cache_kwargs(self.config, self.device, "omnivoice")
         if self.device.upper() == "GPU":
             props = dict(props)
@@ -248,27 +247,44 @@ class TTSOVBackend(TTSBackend):
             "(first GPU compile can take a minute; later loads use ov_cache/omnivoice)",
             flush=True,
         )
-        self._fwd = self._core.compile_model(
-            str(model_dir / "forward.xml"), self.device, props
-        )
-        self._dec = self._core.compile_model(
-            str(model_dir / "decode.xml"), self.device, props
-        )
-        self._fwd_req = self._fwd.create_infer_request()
-        self._dec_req = self._dec.create_infer_request()
-        self._cfg = None
-        self._cfg_req = None
-        # Experimental GPU CFG. Default is NumPy (HF main, 1.69%).
-        # CFG softmax must stay FP32: GPU default f16 overflows to NaN.
-        if str(getattr(self.config, "tts_cfg", "numpy")).lower() == "gpu":
-            cfg_props = dict(props)
-            cfg_props["INFERENCE_PRECISION_HINT"] = "f32"
-            cfg_ir = _build_cfg_model(float(self.config.tts_guidance_scale))
-            self._cfg = self._core.compile_model(cfg_ir, self.device, cfg_props)
-            self._cfg_req = self._cfg.create_infer_request()
-            print("tts compiled (forward+cfg+decode on GPU)", flush=True)
-        else:
-            print("tts compiled (forward+decode on GPU, numpy CFG)", flush=True)
+        core = fwd = dec = cfg = None
+        fwd_req = dec_req = cfg_req = None
+        try:
+            core = ov.Core()
+            fwd = core.compile_model(
+                str(model_dir / "forward.xml"), self.device, props
+            )
+            dec = core.compile_model(
+                str(model_dir / "decode.xml"), self.device, props
+            )
+            fwd_req = fwd.create_infer_request()
+            dec_req = dec.create_infer_request()
+            if str(getattr(self.config, "tts_cfg", "numpy")).lower() == "gpu":
+                # CFG softmax must stay FP32: GPU default f16 overflows to NaN.
+                cfg_props = dict(props)
+                cfg_props["INFERENCE_PRECISION_HINT"] = "f32"
+                cfg_ir = _build_cfg_model(float(self.config.tts_guidance_scale))
+                cfg = core.compile_model(cfg_ir, self.device, cfg_props)
+                cfg_req = cfg.create_infer_request()
+                compiled_msg = "tts compiled (forward+cfg+decode on GPU)"
+            else:
+                compiled_msg = "tts compiled (forward+decode on GPU, numpy CFG)"
+        except BaseException:
+            fwd_req = dec_req = cfg_req = None
+            drop_pipeline(fwd)
+            drop_pipeline(dec)
+            drop_pipeline(cfg)
+            drop_pipeline(core)
+            raise
+        self._tokenizer = tokenizer
+        self._core = core
+        self._fwd = fwd
+        self._dec = dec
+        self._cfg = cfg
+        self._fwd_req = fwd_req
+        self._dec_req = dec_req
+        self._cfg_req = cfg_req
+        print(compiled_msg, flush=True)
 
     def unload(self) -> None:
         fwd, dec, cfg, core = self._fwd, self._dec, self._cfg, self._core
@@ -279,6 +295,7 @@ class TTSOVBackend(TTSBackend):
         self._dec = None
         self._cfg = None
         self._core = None
+        self._tokenizer = None
         drop_pipeline(fwd)
         drop_pipeline(dec)
         drop_pipeline(cfg)
@@ -302,19 +319,17 @@ class TTSOVBackend(TTSBackend):
 
     def _encode(self, text: str) -> list[int]:
         tok = self._tokenizer
-        parts = _NONVERBAL_PATTERN.split(text)
-        # split() with a capturing group interleaves tags; use finditer instead.
         ids: list[int] = []
         last = 0
         for m in _NONVERBAL_PATTERN.finditer(text):
             if m.start() > last:
-                ids.extend(tok.encode(text[last : m.start()], add_special_tokens=False).ids)
-            ids.extend(tok.encode(m.group(), add_special_tokens=False).ids)
+                ids.extend(tok.encode(text[last : m.start()]))
+            ids.extend(tok.encode(m.group()))
             last = m.end()
         if last < len(text):
-            ids.extend(tok.encode(text[last:], add_special_tokens=False).ids)
+            ids.extend(tok.encode(text[last:]))
         if not ids:
-            ids = list(tok.encode(text, add_special_tokens=False).ids)
+            ids = list(tok.encode(text))
         return ids
 
     def _pack_inputs(

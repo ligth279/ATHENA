@@ -349,9 +349,14 @@ class AMC:
             return
         self._unload_resident()
         self.bus.emit("model_loading", model=model.value)
+        backend = self._backend(model)
         try:
-            self._backend(model).load()
+            backend.load()
         except BaseException as exc:
+            try:
+                backend.unload()
+            except Exception:
+                pass
             if is_gpu_dead_error(exc):
                 raise self._poison_gpu(exc) from exc
             raise
