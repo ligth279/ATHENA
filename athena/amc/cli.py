@@ -33,22 +33,32 @@ def _root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _resolve_path(rel: str) -> str:
+    """Honor XILO_* env (via AMCConfig). Relative paths: cwd first, then package root."""
+
+    p = Path(rel).expanduser()
+    if p.is_absolute():
+        return str(p)
+    cwd = (Path.cwd() / p).resolve()
+    if cwd.exists():
+        return str(cwd)
+    return str((_root() / p).resolve())
+
+
 def _base_config(*, timeout: float) -> AMCConfig:
-    root = _root()
-    return AMCConfig(
+    cfg = AMCConfig(
         device="GPU",
         backend="openvino",
-        llama_model_path=str(root / "models" / "llama-3.1-8b-instruct-int4-ov"),
-        llama_int8_path=str(root / "models" / "llama-3.1-8b-instruct-int8-ov"),
-        whisper_model_path=str(root / "models" / "whisper-large-v3-turbo-int8-ov"),
-        translate_model_path=str(root / "models" / "translategemma-4b-it-int8-ov"),
-        tts_model_path=str(root / "models" / "omnivoice-fp16-ov"),
-        cache_dir=str(root / "models" / "ov_cache"),
-        kv_cache_gb=4,
-        kv_cache_gb_int8=2,
         allow_cpu_fallback=False,
         job_timeout_s=timeout,
     )
+    cfg.llama_model_path = _resolve_path(cfg.llama_model_path)
+    cfg.llama_int8_path = _resolve_path(cfg.llama_int8_path)
+    cfg.whisper_model_path = _resolve_path(cfg.whisper_model_path)
+    cfg.translate_model_path = _resolve_path(cfg.translate_model_path)
+    cfg.tts_model_path = _resolve_path(cfg.tts_model_path)
+    cfg.cache_dir = _resolve_path(cfg.cache_dir)
+    return cfg
 
 
 def _int4_config(*, tokens: int, timeout: float) -> AMCConfig:
