@@ -54,13 +54,6 @@ python talk.py "A fraction is a part of a whole." --language en --wav out.wav
 
 `talk.py` on **this branch** compiles `forward`/`decode` FP16 and a **FP32 CFG** graph, runs **16** unmask steps, writes 24 kHz PCM. For the faster NumPy CFG path, use `main`.
 
-With [ATHENA AMC](https://github.com/ligth279/ATHENA) (exclusive GPU slot: load → speak → unload):
-
-```bash
-export XILO_TTS_PATH=OmniVoice-0.2.1-fp16-ov
-python -m athena.amc talk "A fraction is a part of a whole." --language en --wav out.wav
-```
-
 Device is OpenVINO `"GPU"` (Intel). Not NVIDIA CUDA.
 
 ## Metrics
@@ -69,7 +62,7 @@ Hardware: Intel Arc B580 12 GB, i5-10400F, 16 GB DDR4. OpenVINO 2026.4.1, device
 
 ### Seed-TTS English (official 1088-line list)
 
-ASR: Whisper **large-v3 turbo** INT8 (AMC hop). Scorer: OmniVoice `seedtts` post_process (lowercase, strip punctuation). Corpus WER = (S+D+I) / words.
+ASR: Whisper **large-v3 turbo** INT8. Scorer: OmniVoice `seedtts` post_process (lowercase, strip punctuation). Corpus WER = (S+D+I) / words.
 
 | System | n | Corpus WER | Notes |
 |---|---|---|---|
