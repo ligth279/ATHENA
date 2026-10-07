@@ -14,7 +14,8 @@ from athena.amc.backends import (
     MockWhisperBackend,
     _require_ir_dir,
 )
-from athena.amc.exceptions import ModelPathError, RoleError, TTSNotWiredError
+from athena.amc.exceptions import ModelPathError, RoleError
+from athena.amc.tts import MockTTSBackend, _unmask_schedule
 from athena.amc.gpu import is_gpu_dead_error, translator_unsafe_reason
 from athena.amc.roles import evaluator_system_prompt, tutor_system_prompt
 from athena.amc.translate import (
@@ -53,6 +54,7 @@ class AMCTests(unittest.TestCase):
         self.assertEqual(st.resident_model, ModelId.LLAMA_INT4)
         self.assertTrue(self.amc._llama.is_loaded())
         self.assertFalse(self.amc._whisper.is_loaded())
+        self.assertFalse(self.amc._tts.is_loaded())
 
     def test_tutor_keeps_conversation(self) -> None:
         self.amc.enter_event_t({"id": "s1"})
@@ -131,9 +133,21 @@ class AMCTests(unittest.TestCase):
         self.assertIn("photosynthesis", prompt)
         self.assertIn("role TUTOR", prompt)
 
-    def test_talk_is_not_whisper(self) -> None:
-        with self.assertRaises(TTSNotWiredError):
+    def test_talk_needs_text_or_last_reply(self) -> None:
+        with self.assertRaises(ValueError):
             self.amc.talk()
+
+    def test_talk_is_not_whisper(self) -> None:
+        self.amc.enter_event_t({"id": "s1"})
+        self.amc.tutor_ask("explain")
+        speech = self.amc.talk()
+        self.assertGreater(len(speech.pcm), 0)
+        self.assertEqual(speech.sample_rate, 24000)
+        self.assertFalse(self.amc._whisper.is_loaded())
+        self.assertFalse(self.amc._tts.is_loaded())
+        self.assertIsNone(self.amc.status().resident_model)
+        self.assertGreater(len(self.amc._memory), 0)
+        self.assertEqual(self.amc._tts.last_text, "[tutor mock] explain")
 
     def test_second_request_waits_for_first(self) -> None:
         llama = _SlowLlama(hold=0.25)
@@ -167,50 +181,88 @@ class AMCTests(unittest.TestCase):
             def load(self) -> None:
                 super().load()
                 loads.append("int4")
-                if int8.is_loaded() or whisper.is_loaded() or tr.is_loaded():
+                if (
+                    int8.is_loaded()
+                    or whisper.is_loaded()
+                    or tr.is_loaded()
+                    or tts.is_loaded()
+                ):
                     loads.append("BOTH")
 
         class L8(MockLlamaBackend):
             def load(self) -> None:
                 super().load()
                 loads.append("int8")
-                if int4.is_loaded() or whisper.is_loaded() or tr.is_loaded():
+                if (
+                    int4.is_loaded()
+                    or whisper.is_loaded()
+                    or tr.is_loaded()
+                    or tts.is_loaded()
+                ):
                     loads.append("BOTH")
 
         class W(MockWhisperBackend):
             def load(self) -> None:
                 super().load()
                 loads.append("whisper")
-                if int4.is_loaded() or int8.is_loaded() or tr.is_loaded():
+                if (
+                    int4.is_loaded()
+                    or int8.is_loaded()
+                    or tr.is_loaded()
+                    or tts.is_loaded()
+                ):
                     loads.append("BOTH")
 
         class T(MockTranslatorBackend):
             def load(self) -> None:
                 super().load()
                 loads.append("translate")
-                if int4.is_loaded() or int8.is_loaded() or whisper.is_loaded():
+                if (
+                    int4.is_loaded()
+                    or int8.is_loaded()
+                    or whisper.is_loaded()
+                    or tts.is_loaded()
+                ):
+                    loads.append("BOTH")
+
+        class S(MockTTSBackend):
+            def load(self) -> None:
+                super().load()
+                loads.append("tts")
+                if (
+                    int4.is_loaded()
+                    or int8.is_loaded()
+                    or whisper.is_loaded()
+                    or tr.is_loaded()
+                ):
                     loads.append("BOTH")
 
         int4 = L4("llama_int4")
         int8 = L8("llama_int8")
         whisper = W()
         tr = T()
+        tts = S()
         amc = AMC(
             AMCConfig.mock(),
             llama=int4,
             llama_int8=int8,
             whisper=whisper,
             translator=tr,
+            tts=tts,
         )
         try:
             amc.enter_event_t({"id": "s1"})
             amc.transcribe([0.0])
             amc.translate("Hello.", source_lang="en", target_lang="hi")
+            amc.talk("A fraction is a part of a whole.")
             amc.enter_event_e()
             self.assertNotIn("BOTH", loads)
-            self.assertEqual(loads, ["int4", "whisper", "translate", "int8"])
+            self.assertEqual(
+                loads, ["int4", "whisper", "translate", "tts", "int8"]
+            )
             self.assertFalse(int4.is_loaded())
             self.assertFalse(tr.is_loaded())
+            self.assertFalse(tts.is_loaded())
             self.assertTrue(int8.is_loaded())
         finally:
             amc.shutdown()
@@ -240,6 +292,7 @@ class AMCTests(unittest.TestCase):
         self.assertFalse(self.amc._llama.is_loaded())
         self.assertFalse(self.amc._whisper.is_loaded())
         self.assertFalse(self.amc._translator.is_loaded())
+        self.assertFalse(self.amc._tts.is_loaded())
         self.assertIsNone(self.amc.status().resident_model)
 
     def test_translate_unloads_llama_and_unloads_after(self) -> None:
@@ -266,6 +319,14 @@ class AMCTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertFalse(self.amc._translator.is_loaded())
         self.assertEqual(self.amc._translator.calls, [])
+
+
+class TTSHelperTests(unittest.TestCase):
+    def test_unmask_schedule_covers_all_slots(self) -> None:
+        sched = _unmask_schedule(25, num_step=16, t_shift=0.1)
+        self.assertEqual(len(sched), 16)
+        self.assertEqual(sum(sched), 25 * 8)
+        self.assertTrue(all(n >= 0 for n in sched))
 
 
 class IRPathTests(unittest.TestCase):

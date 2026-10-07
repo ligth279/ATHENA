@@ -14,6 +14,7 @@ from athena.amc.gpu import (
     resolve_device,
 )
 from athena.amc.translate import ApproxTokenCounter
+from athena.amc.tts import MockTTSBackend, TTSBackend, TTSOVBackend
 from athena.amc.types import Streamer
 
 
@@ -421,14 +422,21 @@ class TranslateOVBackend(TranslatorBackend):
         cfg = self._pipe.get_generation_config()
         cfg.max_new_tokens = int(max_new_tokens)
         cfg.do_sample = False
+        # Default max_length is 2^64-1. Cap to 2K input + new.
+        if hasattr(cfg, "max_length"):
+            cfg.max_length = int(self.config.translate_max_input_tokens) + int(
+                max_new_tokens
+            )
+        # Gemma chat ends on <end_of_turn> (106), not only <eos> (1).
+        # Without 106, generate runs to max_new_tokens (~11s) after a short hyp.
+        if hasattr(cfg, "stop_token_ids"):
+            cfg.stop_token_ids = {1, 106}
         if hasattr(cfg, "apply_chat_template"):
             cfg.apply_chat_template = False
         if hasattr(cfg, "return_decoded_results"):
             cfg.return_decoded_results = True
-        # Text-only Event G hop: no image/video tensors.
-        result = self._pipe.generate(
-            prompt, images=[], generation_config=cfg
-        )
+        # Do not pass images=[]. That path OOMs generate (-5) on the B580.
+        result = self._pipe.generate(prompt, generation_config=cfg)
         return _as_text(result)
 
     def token_count(self, text: str) -> int:
@@ -437,13 +445,16 @@ class TranslateOVBackend(TranslatorBackend):
 
 def build_backends(
     config: AMCConfig,
-) -> tuple[LlamaBackend, LlamaBackend, WhisperBackend, TranslatorBackend]:
+) -> tuple[
+    LlamaBackend, LlamaBackend, WhisperBackend, TranslatorBackend, TTSBackend
+]:
     if config.backend == "mock":
         return (
             MockLlamaBackend("llama_int4"),
             MockLlamaBackend("llama_int8"),
             MockWhisperBackend(),
             MockTranslatorBackend(),
+            MockTTSBackend(),
         )
     int4 = LlamaOVBackend(
         config,
@@ -459,4 +470,10 @@ def build_backends(
         cache_subdir="int8",
         name="llama_int8",
     )
-    return int4, int8, WhisperOVBackend(config), TranslateOVBackend(config)
+    return (
+        int4,
+        int8,
+        WhisperOVBackend(config),
+        TranslateOVBackend(config),
+        TTSOVBackend(config),
+    )

@@ -10,6 +10,6 @@ Product logic: 2333.txt section 2.
 
 from athena.amc.config import AMCConfig
 from athena.amc.controller import AMC
-from athena.amc.types import Event, LlamaRole, ModelId
+from athena.amc.types import Event, LlamaRole, ModelId, Speech
 
-__all__ = ["AMC", "AMCConfig", "Event", "LlamaRole", "ModelId"]
+__all__ = ["AMC", "AMCConfig", "Event", "LlamaRole", "ModelId", "Speech"]

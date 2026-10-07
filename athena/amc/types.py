@@ -30,6 +30,7 @@ class ModelId(str, Enum):
     LLAMA_INT8 = "llama_int8"  # evaluator — 2 GB KV
     WHISPER = "whisper"
     TRANSLATE = "translate"  # Event G hop — TranslateGemma 4B INT8
+    TTS = "tts"  # Event G hop — OmniVoice FP16, unload after speak
 
 
 class JobKind(str, Enum):
@@ -38,6 +39,7 @@ class JobKind(str, Enum):
     HINT = "hint"
     TRANSCRIBE = "transcribe"
     TRANSLATE = "translate"
+    TALK = "talk"
     LEAVE_ROLE = "leave_role"
     SHUTDOWN = "shutdown"
 
@@ -46,6 +48,14 @@ class JobKind(str, Enum):
 class Turn:
     role: str  # "user" | "assistant"
     text: str
+
+
+@dataclass(frozen=True)
+class Speech:
+    """24 kHz PCM from the TTS hop. Not Whisper (16 kHz STT)."""
+
+    pcm: list[float]
+    sample_rate: int = 24000
 
 
 @dataclass

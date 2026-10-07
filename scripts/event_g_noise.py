@@ -55,7 +55,7 @@ def main() -> int:
         _combo("C  hi type → hi out (in+llama+out)", source_lang="hi", target_lang="hi"),
         _combo("D  hi speech → hi out (stt+in+llama+out)", speech=True, source_lang="hi", target_lang="hi"),
         _combo(
-            "E  hi speech+speak (tts not counted)",
+            "E  hi speech+speak (tts is audio, not text noise)",
             speech=True,
             speak=True,
             source_lang="hi",
@@ -73,7 +73,7 @@ def main() -> int:
             wers.append(word_error_rate(GOLD, hyp))
         mean = sum(wers) / len(wers)
         print(f"{name:48} {len(channel):2d}  {mean:7.1%}")
-    print("TTS is not wired; speak adds no extra text noise.")
+    print("TTS is audio; speak adds no extra text noise.")
     return 0
 
 

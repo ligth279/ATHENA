@@ -14,7 +14,7 @@ from athena.amc.backends import (
 )
 from athena.amc.bus import EventBus
 from athena.amc.config import AMCConfig
-from athena.amc.exceptions import GpuDeadError, RoleError, TTSNotWiredError
+from athena.amc.exceptions import GpuDeadError, RoleError
 from athena.amc.gpu import gpu_dead_message, is_gpu_dead_error, resolve_device
 from athena.amc.memory import ConversationMemory
 from athena.amc.roles import evaluator_system_prompt, tutor_system_prompt
@@ -23,12 +23,14 @@ from athena.amc.translate import (
     format_translate_prompt,
     join_translations,
 )
+from athena.amc.tts import TTSBackend
 from athena.amc.types import (
     AMCStatus,
     Event,
     JobKind,
     LlamaRole,
     ModelId,
+    Speech,
     Streamer,
     Turn,
 )
@@ -42,7 +44,7 @@ class _Job:
 
 
 class AMC:
-    """Exclusive GPU scheduler for Llama, Whisper, and TranslateGemma.
+    """Exclusive GPU scheduler for Llama, Whisper, TranslateGemma, and TTS.
 
     All public methods enqueue work onto a single worker thread. A second
     request never loads a second model: it waits until the current job
@@ -65,6 +67,7 @@ class AMC:
         llama_int8: LlamaBackend | None = None,
         whisper: WhisperBackend | None = None,
         translator: TranslatorBackend | None = None,
+        tts: TTSBackend | None = None,
         data_controller: Any | None = None,
     ) -> None:
         self.config = config or AMCConfig()
@@ -74,19 +77,20 @@ class AMC:
             or llama_int8 is None
             or whisper is None
             or translator is None
+            or tts is None
         ):
-            built_int4, built_int8, built_whisper, built_tr = build_backends(
-                self.config
-            )
-            llama = llama or built_int4
-            llama_int8 = llama_int8 if llama_int8 is not None else built_int8
-            whisper = whisper or built_whisper
-            translator = translator or built_tr
+            built = build_backends(self.config)
+            llama = llama or built[0]
+            llama_int8 = llama_int8 if llama_int8 is not None else built[1]
+            whisper = whisper or built[2]
+            translator = translator or built[3]
+            tts = tts if tts is not None else built[4]
         self._llama_int4 = llama
         self._llama_int8 = llama_int8
         self._llama = llama  # tutor alias (INT4)
         self._whisper = whisper
         self._translator = translator
+        self._tts = tts
         self._dc = data_controller
         self.bus = EventBus()
 
@@ -205,18 +209,21 @@ class AMC:
             timeout,
         )
 
-    def talk(self, text: str | None = None) -> None:
-        """Talk button — read the last AI reply out loud.
+    def talk(
+        self,
+        text: str | None = None,
+        *,
+        language: str | None = None,
+        timeout: float | None = None,
+    ) -> Speech:
+        """Talk button — OmniVoice TTS hop. Not Whisper (Whisper is STT).
 
-        The v6 docs mention Whisper here, but Whisper is speech-to-text.
-        TTS needs OpenVINO Text2SpeechPipeline (separate model, still
-        exclusive GPU). Not wired in this pass.
+        Speaks ``text``, or the last tutor reply if ``text`` is omitted.
+        Unloads after the waveform is returned (holds no knowledge).
         """
 
-        raise TTSNotWiredError(
-            "Talk/TTS is not Whisper. Whisper only converts speech to text "
-            "(speak button). Wire OpenVINO Text2SpeechPipeline as a third "
-            "exclusive GPU model when you want the talk button."
+        return self._submit(
+            JobKind.TALK, {"text": text, "language": language}, timeout
         )
 
     def leave_role(self, timeout: float | None = None) -> list[Turn]:
@@ -292,6 +299,8 @@ class AMC:
             return self._transcribe(p["pcm"])
         if kind is JobKind.TRANSLATE:
             return self._translate(p["text"], p["source_lang"], p["target_lang"])
+        if kind is JobKind.TALK:
+            return self._talk(p.get("text"), p.get("language"))
         if kind is JobKind.LEAVE_ROLE:
             return self._leave_role()
         if kind is JobKind.SHUTDOWN:
@@ -303,13 +312,15 @@ class AMC:
 
     def _backend(
         self, model: ModelId
-    ) -> LlamaBackend | WhisperBackend | TranslatorBackend:
+    ) -> LlamaBackend | WhisperBackend | TranslatorBackend | TTSBackend:
         if model is ModelId.LLAMA_INT4:
             return self._llama_int4
         if model is ModelId.LLAMA_INT8:
             return self._llama_int8
         if model is ModelId.TRANSLATE:
             return self._translator
+        if model is ModelId.TTS:
+            return self._tts
         return self._whisper
 
     @staticmethod
@@ -466,6 +477,22 @@ class AMC:
             return join_translations(chunks, pieces)
         finally:
             # Product: translator holds no knowledge after pass-on.
+            self._unload_resident()
+
+    def _talk(self, text: str | None, language: str | None) -> Speech:
+        spoken = (text or "").strip()
+        if not spoken:
+            for turn in reversed(self._memory.turns):
+                if turn.role == "assistant" and turn.text.strip():
+                    spoken = turn.text.strip()
+                    break
+        if not spoken:
+            raise ValueError("talk needs text or a last assistant reply")
+        self._ensure(ModelId.TTS)
+        try:
+            return self._tts.speak(spoken, language=language)
+        finally:
+            # Product: TTS holds no knowledge after pass-on.
             self._unload_resident()
 
     def _leave_role(self) -> list[Turn]:

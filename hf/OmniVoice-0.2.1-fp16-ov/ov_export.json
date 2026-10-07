@@ -1,0 +1,12 @@
+{
+  "format": "openvino-fp16",
+  "source": "k2-fsa/OmniVoice",
+  "version": "0.2.1",
+  "graphs": [
+    "forward",
+    "decode"
+  ],
+  "codebooks": 8,
+  "sample_rate": 24000,
+  "runtime": "openvino GPU \u2014 no PyTorch"
+}

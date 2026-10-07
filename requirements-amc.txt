@@ -1,9 +1,11 @@
 # AMC runtime on Intel Arc B580 — install ONLY after administrator approval.
 # Forbidden: bitsandbytes, nvidia-*, cuda, intel-extension-for-pytorch (IPEX).
 #
-# Pin to current OpenVINO (2026.3.0, 4 Aug 2026). Keep openvino and
-# openvino-genai on the same year.minor. GenAI is the inference engine;
-# PyTorch is not required to *run* converted IR models.
-openvino>=2026.3
-openvino-genai>=2026.3
+# Pin to current OpenVINO (2026.4.1, 1 Oct 2026). Keep openvino,
+# openvino-genai, and openvino-tokenizers on the same year.minor.
+# GenAI is the inference engine; PyTorch is not required to *run*
+# converted IR models.
+openvino==2026.4.1
+openvino-genai==2026.4.1
+openvino-tokenizers==2026.4.1
 numpy>=2.0
