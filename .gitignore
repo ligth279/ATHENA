@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local env
+.venv/
+venv/
+.env
+
+# Weights, IR, GPU compile cache (large / machine-local)
+models/
+ov_cache/
+.cache/
+*.ovcache
+*.part
+*.blob
+*.cl_cache
+*-vision-bak/
+
+# OpenVINO IR blobs if they land outside models/
+*.bin
+*.xml
+
+# Audio dumps
+*.wav
+
+# Editor / Grok session
+.grok/
+*.swp
+
+# Download / pip / nohup noise
+*.log
+nohup.out
