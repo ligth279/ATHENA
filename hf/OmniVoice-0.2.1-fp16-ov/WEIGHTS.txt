@@ -1,9 +1,0 @@
-Weight blobs are on Hugging Face, not this git tree.
-
-  hf download light434/OmniVoice-0.2.1-fp16-ov --local-dir OmniVoice-0.2.1-fp16-ov
-
-SHA256 (match local IR and both Hub branches):
-  forward.bin  1225155044  0a73d587065c72f1d91b1bc49eb3feaca3b2539037b365f2e40cded0d77074ee
-  decode.bin     43144674  604a691f6f0c276ef6ae3e9eb219419da7d44397608f47cada9f6d1d62ba0b92
-
-Experimental GPU CFG talk.py: ../gpu-cfg-fp32/ and Hub revision gpu-cfg-fp32.

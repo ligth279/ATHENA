@@ -26,9 +26,8 @@ ov_cache/
 *.bin
 *.xml
 
-# Hub snapshot: graphs + scripts. Weight .bin files stay on Hugging Face
-# (forward.bin is 1.2 GB; GitHub file limit is 100 MB).
-!hf/OmniVoice-0.2.1-fp16-ov/*.xml
+# Hugging Face snapshots stay on the Hub, not this git tree
+hf/
 
 # Audio dumps
 *.wav
